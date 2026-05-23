@@ -1,0 +1,96 @@
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12"]
+build-backend = "uv_build"
+
+[project]
+name = "musubito"
+version = "0.1.0"
+description = "Deterministic Python runtime for relational execution lineage DAGs."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Domenico Altieri", email = "softwaretamrsv@gmail.com" },
+]
+keywords = [
+    "ai-agents",
+    "deterministic-replay",
+    "execution-lineage",
+    "lineage",
+    "sqlite",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.urls]
+Repository = "https://github.com/daltieri86/musubito"
+Issues = "https://github.com/daltieri86/musubito/issues"
+Changelog = "https://github.com/daltieri86/musubito/releases"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.11",
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+]
+
+[tool.uv.build-backend]
+module-name = "musubito"
+module-root = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "B",
+    "E",
+    "F",
+    "I",
+    "PL",
+    "RUF",
+    "SIM",
+    "UP",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+mypy_path = "src"
+files = ["src", "tests"]
+warn_unused_configs = true
+warn_unreachable = true
+show_error_codes = true
