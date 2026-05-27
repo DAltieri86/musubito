@@ -18,6 +18,8 @@ from typing import Any
 from musubito.models import Artifact, ArtifactType, ExecutionNode, NodeStatus
 from musubito.semantics import StepConfiguration
 
+MAX_RECURSIVE_INVALIDATION_DEPTH = 10_000
+
 
 class SQLiteStorage:
     """SQLite-backed persistence layer for artifacts, nodes, and DAG edges."""
@@ -586,10 +588,11 @@ def _should_invalidate_after_failure(
 def _invalidate_downstream(connection: sqlite3.Connection, node_id: str) -> None:
     connection.execute(
         """
-        WITH RECURSIVE downstream(node_id, path) AS (
+        WITH RECURSIVE downstream(node_id, path, depth) AS (
             SELECT
                 e.child_node_id,
-                ',' || e.parent_node_id || ','
+                ',' || e.parent_node_id || ',' || e.child_node_id || ',',
+                1
             FROM edges AS e
             WHERE e.parent_node_id = ?
 
@@ -597,12 +600,13 @@ def _invalidate_downstream(connection: sqlite3.Connection, node_id: str) -> None
 
             SELECT
                 e.child_node_id,
-                d.path || e.child_node_id || ','
+                d.path || e.child_node_id || ',',
+                d.depth + 1
             FROM edges AS e
             JOIN downstream AS d
                 ON e.parent_node_id = d.node_id
             WHERE d.path NOT LIKE '%,' || e.child_node_id || ',%'
-                AND LENGTH(d.path) < 1000
+                AND d.depth < ?
         )
         UPDATE nodes
         SET status = ?
@@ -611,7 +615,7 @@ def _invalidate_downstream(connection: sqlite3.Connection, node_id: str) -> None
             FROM downstream
         )
         """,
-        (node_id, NodeStatus.STALE.value),
+        (node_id, MAX_RECURSIVE_INVALIDATION_DEPTH, NodeStatus.STALE.value),
     )
 
 

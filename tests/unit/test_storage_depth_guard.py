@@ -14,7 +14,7 @@ EXECUTED_AT = datetime(2026, 5, 23, 10, 0, tzinfo=timezone.utc)
 DEPTH_GUARD_TIMEOUT_SECONDS = 2.0
 
 
-def test_invalidate_downstream_respects_depth_guard_on_two_hundred_node_chain(
+def test_invalidate_downstream_reaches_two_hundred_node_chain_with_logical_depth_guard(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "test_1.db"
@@ -35,8 +35,8 @@ def test_invalidate_downstream_respects_depth_guard_on_two_hundred_node_chain(
     assert statuses["N0001"] == NodeStatus.STALE.value
     assert statuses["N0050"] == NodeStatus.STALE.value
     assert statuses["N0167"] == NodeStatus.STALE.value
-    assert statuses["N0168"] == NodeStatus.SUCCESS.value
-    assert statuses["N0199"] == NodeStatus.SUCCESS.value
+    assert statuses["N0168"] == NodeStatus.STALE.value
+    assert statuses["N0199"] == NodeStatus.STALE.value
 
 
 def test_invalidate_downstream_terminates_within_timeout_on_manual_cycle(

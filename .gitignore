@@ -82,3 +82,6 @@ env/
 
 # Musubito local runtime data
 .musubito/
+
+# local paper assets (untracked)
+paper/
