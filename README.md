@@ -23,6 +23,175 @@ Fan-in DAG patterns are first-class: `musubito_merge()` lets an aggregate step e
 pip install musubito
 ```
 
+## Real-World Examples
+
+The examples below use real LLM SDK calls. Install the provider SDK you need
+(`pip install openai` or `pip install anthropic`) and set the matching API key in
+your environment before running them.
+
+### Single LLM call with permanent cache
+
+```python
+import time
+
+from openai import OpenAI
+
+from musubito import StepConfiguration, StepType, musubito_step
+
+client = OpenAI()
+
+
+@musubito_step(
+    semantics=StepConfiguration(step_type=StepType.DETERMINISTIC),
+)
+def explain_runtime(prompt: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.choices[0].message.content or ""
+
+
+prompt = "Explain deterministic replay for LLM research agents in five bullets."
+
+start = time.perf_counter()
+first = explain_runtime(prompt)
+first_ms = (time.perf_counter() - start) * 1000
+
+start = time.perf_counter()
+second = explain_runtime(prompt)
+second_ms = (time.perf_counter() - start) * 1000
+
+# The second call saves one OpenAI API request for the same stable prompt.
+print(first.value[:200])
+print(second.value[:200])
+print(f"first={first_ms:.1f} ms replay={second_ms:.1f} ms")
+```
+
+### Expiring cache for fresh answers
+
+```python
+from openai import OpenAI
+
+from musubito import StepConfiguration, StepType, musubito_step
+
+client = OpenAI()
+
+fresh_hourly = StepConfiguration(
+    step_type=StepType.STOCHASTIC,
+    ttl_seconds=3600,
+)
+
+
+@musubito_step(semantics=fresh_hourly)
+def market_brief(topic: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.4,
+        messages=[
+            {
+                "role": "user",
+                "content": f"Write a concise market-watch brief about {topic}.",
+            }
+        ],
+    )
+    return response.choices[0].message.content or ""
+
+
+result = market_brief("AI infrastructure startups")
+
+# STOCHASTIC + TTL saves repeat API calls for one hour, then refreshes naturally.
+print(result.value)
+```
+
+### Two-step pipeline with lineage
+
+```python
+from anthropic import Anthropic
+
+from musubito import MusubitoResult, StepConfiguration, StepType
+from musubito import musubito_merge, musubito_step
+
+client = Anthropic()
+
+
+@musubito_step()
+def extract_key_facts(text: str) -> str:
+    message = client.messages.create(
+        model="claude-3-5-haiku-latest",
+        max_tokens=300,
+        messages=[{"role": "user", "content": f"Extract key facts:\n{text}"}],
+    )
+    return message.content[0].text
+
+
+@musubito_step(
+    semantics=StepConfiguration(step_type=StepType.STOCHASTIC, ttl_seconds=86400),
+)
+def write_social_summary(facts: MusubitoResult[str]) -> str:
+    message = client.messages.create(
+        model="claude-3-5-haiku-latest",
+        max_tokens=120,
+        messages=[{"role": "user", "content": f"Write one tweet:\n{facts.value}"}],
+    )
+    return message.content[0].text
+
+
+source_text = "Musubito records execution lineage for replayable agent steps."
+facts = extract_key_facts(source_text)
+
+with musubito_merge(facts):
+    summary = write_social_summary(facts)
+
+# Re-running saves the extraction call immediately; the summary refreshes after TTL.
+print(summary.value)
+```
+
+### Custom storage path for a project
+
+```python
+from openai import OpenAI
+
+from musubito import MusubitoEngine, SQLiteStorage
+from musubito import musubito_step, use_musubito_engine
+
+client = OpenAI()
+
+
+@musubito_step()
+def classify_note(note: str) -> str:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0,
+        messages=[
+            {
+                "role": "user",
+                "content": f"Classify this research note in one label:\n{note}",
+            }
+        ],
+    )
+    return response.choices[0].message.content or ""
+
+
+storage = SQLiteStorage(db_path=".musubito/project-alpha.db")
+engine = MusubitoEngine(storage)
+
+with storage, use_musubito_engine(engine):
+    result = classify_note("GPU scheduling dominates the serving bottleneck.")
+
+# A project-specific DB keeps replay separate across teams or experiments.
+print(result.value)
+```
+
+## When to Use Which StepType
+
+| StepType | When to use it | LLM example |
+|---|---|---|
+| `DETERMINISTIC` | Pure or stable outputs | Text normalization, embeddings, structured extraction |
+| `STOCHASTIC` | Outputs may vary or go stale | Chat completions, generative summaries |
+| `EXTERNAL_EFFECT` | Side effects beyond the return value | Sending email, writing to a DB, calling a webhook |
+
 ## Core Concepts
 
 A **node** is one recorded execution of a decorated function. Its identity is computed from three things: the operation name, the canonical hash of the function inputs, and the sorted set of upstream node IDs. This makes node identity stable across runs when the logical computation is the same.
@@ -38,68 +207,6 @@ A **node** is one recorded execution of a decorated function. Its identity is co
 An **Artifact** is the persisted output of a node. `MusubitoResult[T]` points to that artifact and carries both the current DAG node ID and the historical producer node ID.
 
 `musubito_merge()` declares an explicit multi-parent context. It is used when one step depends on multiple previous `MusubitoResult[T]` values, making fan-in DAG edges visible to the lineage engine.
-
-## Quickstart
-
-```python
-import asyncio
-
-from musubito import MusubitoResult, musubito_merge, musubito_step
-
-calls = {
-    "fetch_context": 0,
-    "fetch_policy": 0,
-    "summarize": 0,
-}
-
-
-@musubito_step()
-async def fetch_context(topic: str) -> dict[str, str]:
-    calls["fetch_context"] += 1
-    return {"topic": topic, "source": "local"}
-
-
-@musubito_step()
-async def fetch_policy(topic: str) -> dict[str, str]:
-    calls["fetch_policy"] += 1
-    return {"topic": topic, "policy": "strict-replay"}
-
-
-@musubito_step()
-def summarize(
-    context: MusubitoResult[dict[str, str]],
-    policy: MusubitoResult[dict[str, str]],
-) -> dict[str, str]:
-    calls["summarize"] += 1
-    return {
-        "topic": context.value["topic"],
-        "source": context.value["source"],
-        "policy": policy.value["policy"],
-    }
-
-
-async def main(label: str) -> None:
-    context, policy = await asyncio.gather(
-        fetch_context("lineage"),
-        fetch_policy("lineage"),
-    )
-
-    with musubito_merge(context, policy):
-        result = summarize(context, policy)
-
-    print(label, result.value)
-    print(label, calls)
-
-
-asyncio.run(main("first run"))
-asyncio.run(main("second run"))
-
-# Assumes a fresh .musubito/musubito.db in the current working directory.
-# The second asyncio.run(...) replays from SQLite in the same Python process
-# and does not re-execute the decorated functions, so each counter remains at 1.
-```
-
-Decorated functions return `MusubitoResult[T]`. The raw user value is available through `.value`; the wrapper is not unwrapped automatically.
 
 ## Step Configuration
 
@@ -201,14 +308,6 @@ The path can be customized with `SQLiteStorage(db_path=...)`.
 SQLite is opened in WAL mode and uses short `BEGIN IMMEDIATE` write transactions for node, artifact, edge, and invalidation updates. This keeps local concurrent writes predictable while still allowing normal reads.
 
 Downstream invalidation is performed in place with a recursive CTE. When a node output changes, dependent downstream nodes can be marked stale so future runs recompute only the affected part of the DAG.
-
-## Use Cases
-
-- Agentic LLM pipelines with repeated planning, tool, or synthesis steps.
-- Multi-step RAG workflows where retrieval, filtering, and summarization can be replayed.
-- CI regression workflows that call expensive tools or model-based checks.
-- Long-running research agents that need durable local execution memory.
-- Reproducible evaluation pipelines with explicit lineage and cache boundaries.
 
 ## License
 

@@ -8,9 +8,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -24,9 +25,25 @@ MAX_RECURSIVE_INVALIDATION_DEPTH = 10_000
 class SQLiteStorage:
     """SQLite-backed persistence layer for artifacts, nodes, and DAG edges."""
 
-    def __init__(self, db_path: str = ".musubito/musubito.db") -> None:
+    def __init__(
+        self,
+        db_path: str = ".musubito/musubito.db",
+        *,
+        retention_days: int | None = None,
+        max_size_mb: float | None = None,
+        auto_vacuum: bool = False,
+    ) -> None:
+        if retention_days is not None and retention_days <= 0:
+            raise ValueError("retention_days must be positive when set")
+        if max_size_mb is not None and max_size_mb <= 0:
+            raise ValueError("max_size_mb must be positive when set")
+
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._retention_days = retention_days
+        self._max_size_mb = max_size_mb
+        self._auto_vacuum = auto_vacuum
+        self._last_retention_purge_monotonic: float | None = None
         self._connection_lock = threading.RLock()
         self._connection = sqlite3.connect(
             str(self._db_path),
@@ -37,6 +54,8 @@ class SQLiteStorage:
         self._connection.row_factory = sqlite3.Row
         self._configure_connection()
         self._initialize_schema()
+        self._run_retention_purge(force=True)
+        self._enforce_size_limit()
 
     def __enter__(self) -> SQLiteStorage:
         return self
@@ -361,6 +380,23 @@ class SQLiteStorage:
         with self._write_transaction() as connection:
             _invalidate_downstream(connection, node_id)
 
+    def vacuum(self) -> None:
+        """Run an incremental SQLite vacuum on demand."""
+
+        with self._connection_lock:
+            _run_incremental_vacuum(self._connection)
+
+    def storage_stats(self) -> dict[str, str | float | int]:
+        """Return lightweight storage size and row-count information."""
+
+        with self._connection_lock:
+            return {
+                "db_path": str(self._db_path),
+                "estimated_size_mb": _estimate_size_mb(self._connection),
+                "node_count": _count_rows(self._connection, "nodes"),
+                "artifact_count": _count_rows(self._connection, "artifacts"),
+            }
+
     def _configure_connection(self) -> None:
         with self._connection_lock:
             self._connection.execute("PRAGMA journal_mode=WAL")
@@ -368,6 +404,10 @@ class SQLiteStorage:
             self._connection.execute("PRAGMA foreign_keys=ON")
 
     def _initialize_schema(self) -> None:
+        if self._auto_vacuum:
+            with self._connection_lock:
+                self._connection.execute("PRAGMA auto_vacuum = INCREMENTAL")
+
         statements = (
             """
             CREATE TABLE IF NOT EXISTS artifacts (
@@ -415,13 +455,19 @@ class SQLiteStorage:
             """,
         )
 
-        with self._write_transaction() as connection:
+        with self._write_transaction(run_lifecycle=False) as connection:
             for statement in statements:
                 connection.execute(statement)
 
     @contextmanager
-    def _write_transaction(self) -> Iterator[sqlite3.Connection]:
+    def _write_transaction(
+        self,
+        *,
+        run_lifecycle: bool = True,
+    ) -> Iterator[sqlite3.Connection]:
         with self._connection_lock:
+            if run_lifecycle:
+                self._run_retention_purge_if_due_locked()
             self._connection.execute("BEGIN IMMEDIATE")
             try:
                 yield self._connection
@@ -430,6 +476,79 @@ class SQLiteStorage:
                 raise
             else:
                 self._connection.commit()
+                if run_lifecycle:
+                    self._enforce_size_limit_locked()
+
+    def _run_retention_purge(self, *, force: bool = False) -> None:
+        with self._connection_lock:
+            self._run_retention_purge_if_due_locked(force=force)
+
+    def _run_retention_purge_if_due_locked(self, *, force: bool = False) -> None:
+        if self._retention_days is None:
+            return
+
+        current_monotonic = time.monotonic()
+        interval_seconds = float(self._retention_days) / 10.0
+        if (
+            not force
+            and self._last_retention_purge_monotonic is not None
+            and current_monotonic - self._last_retention_purge_monotonic <= interval_seconds
+        ):
+            return
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self._retention_days)
+        cutoff_iso = cutoff.isoformat()
+
+        self._connection.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = self._connection.execute(
+                """
+                DELETE FROM nodes
+                WHERE executed_at < ?
+                """,
+                (cutoff_iso,),
+            )
+            if cursor.rowcount > 0:
+                _delete_orphan_artifacts(self._connection)
+        except BaseException:
+            self._connection.rollback()
+            raise
+        else:
+            self._connection.commit()
+            self._last_retention_purge_monotonic = current_monotonic
+
+    def _enforce_size_limit(self) -> None:
+        with self._connection_lock:
+            self._enforce_size_limit_locked()
+
+    def _enforce_size_limit_locked(self) -> None:
+        if self._max_size_mb is None:
+            return
+
+        target_size_mb = self._max_size_mb * 0.9
+        current_size_mb = _estimate_size_mb(self._connection)
+        if current_size_mb <= self._max_size_mb:
+            return
+
+        while current_size_mb > target_size_mb:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                deleted_count = _delete_oldest_nodes_batch(self._connection, batch_size=100)
+                if deleted_count > 0:
+                    _delete_orphan_artifacts(self._connection)
+            except BaseException:
+                self._connection.rollback()
+                raise
+            else:
+                self._connection.commit()
+
+            if deleted_count == 0:
+                return
+
+            if self._auto_vacuum:
+                _run_incremental_vacuum(self._connection)
+
+            current_size_mb = _estimate_size_mb(self._connection)
 
 
 def _serialize_json(value: Any) -> str:
@@ -617,6 +736,59 @@ def _invalidate_downstream(connection: sqlite3.Connection, node_id: str) -> None
         """,
         (node_id, MAX_RECURSIVE_INVALIDATION_DEPTH, NodeStatus.STALE.value),
     )
+
+
+def _delete_oldest_nodes_batch(
+    connection: sqlite3.Connection,
+    *,
+    batch_size: int,
+) -> int:
+    cursor = connection.execute(
+        """
+        DELETE FROM nodes
+        WHERE node_id IN (
+            SELECT node_id
+            FROM nodes
+            ORDER BY executed_at ASC, node_id ASC
+            LIMIT ?
+        )
+        """,
+        (batch_size,),
+    )
+    return int(cursor.rowcount)
+
+
+def _delete_orphan_artifacts(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        DELETE FROM artifacts
+        WHERE artifact_id NOT IN (
+            SELECT output_artifact_id
+            FROM nodes
+            WHERE output_artifact_id IS NOT NULL
+        )
+        """
+    )
+
+
+def _estimate_size_mb(connection: sqlite3.Connection) -> float:
+    page_count_row = connection.execute("PRAGMA page_count").fetchone()
+    page_size_row = connection.execute("PRAGMA page_size").fetchone()
+    page_count = int(page_count_row[0])
+    page_size = int(page_size_row[0])
+    return (page_count * page_size) / (1024 * 1024)
+
+
+def _count_rows(connection: sqlite3.Connection, table_name: str) -> int:
+    if table_name not in {"artifacts", "nodes"}:
+        raise ValueError(f"unsupported table name: {table_name}")
+
+    row = connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+    return int(row[0])
+
+
+def _run_incremental_vacuum(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA incremental_vacuum")
 
 
 def _node_from_row(row: sqlite3.Row) -> ExecutionNode:
