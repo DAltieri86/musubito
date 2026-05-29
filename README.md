@@ -5,6 +5,8 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
+![Musubito - AI Workflow Lineage](https://user-gen-media-assets.s3.amazonaws.com/gpt4o_images/dba2a29d-53f5-4833-8205-f5244e183df7.png)
+
 Musubito records execution lineage so agentic LLM workflows can safely skip redundant expensive calls instead of recomputing the same DAG steps.
 
 ## Why Musubito?
