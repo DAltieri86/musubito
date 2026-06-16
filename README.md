@@ -311,6 +311,20 @@ SQLite is opened in WAL mode and uses short `BEGIN IMMEDIATE` write transactions
 
 Downstream invalidation is performed in place with a recursive CTE. When a node output changes, dependent downstream nodes can be marked stale so future runs recompute only the affected part of the DAG.
 
+## Citation
+
+If you use Musubito in any way, including research, experiments, prototypes,
+internal tools, or derivative implementations, please cite the accompanying
+preprint.
+
+Altieri, Domenico, *Musubito: Deterministic Execution Lineage for AI-Enabled
+Python Workflows*. Available at SSRN:
+[https://ssrn.com/abstract=6947764](https://ssrn.com/abstract=6947764) or DOI:
+[http://dx.doi.org/10.2139/ssrn.6947764](http://dx.doi.org/10.2139/ssrn.6947764)
+
+Citations help document the use of the project, support future maintenance, and
+make related work easier to trace.
+
 ## License
 
 Musubito is dual-licensed:
